@@ -10,16 +10,17 @@
 // includes a status indicator and a blinking animation for visual feedback.
 
 import SwiftUI
+import Combine
+
+
 
 struct ContentView: View {
-    // Currently selected building ("A" or "B")
-    @State private var selectedBuilding = "A"
-    
-    // Currently selected level in the building
-    @State private var selectedLevel = 0
+    @StateObject private var apiManager = APIManager()
 
-    // Currently selected room number
-    @State private var selectedRoom = 1
+    // Changed to optional types to reflect real data from apiManager
+    @State private var selectedBuilding: String? = nil
+    @State private var selectedLevel: Int? = nil
+    @State private var selectedRoomID: String? = nil
 
     // Current step in the selection process (0 = building, 1 = level, etc.)
     @State private var step = 0
@@ -29,8 +30,23 @@ struct ContentView: View {
 
     @State private var showUnlockPopup = false
     
-    private var levelsForSelectedBuilding: [Int] {
-        selectedBuilding == "A" ? [-1, 0, 1] : [0, 1, 2]
+    // Computed properties based on apiManager data
+    
+    var availableBuildings: [String] {
+        Array(Set(apiManager.availableDevicePool.map { $0.building })).sorted()
+    }
+    
+    // There is no Building struct—levels are derived from Device objects for the selected building.
+    var availableLevels: [Int] {
+        guard let building = selectedBuilding,
+              let buildingObject = apiManager.availableDevicePool.first(where: { $0.building == building }) else { return [] }
+        return buildingObject.levels.map { $0.level }.sorted()
+    }
+    
+    var availableDevices: [Device] {
+        guard let building = selectedBuilding, let level = selectedLevel else { return [] }
+        let devices = apiManager.devices(inBuilding: building, level: level)
+        return devices.sorted { $0.room < $1.room }
     }
 
     var body: some View {
@@ -50,12 +66,21 @@ struct ContentView: View {
                         .padding(.bottom, 8)
                     HStack(spacing: 8) {
                         Text("Bitte auswählen:")
-                        Picker("Gebäude", selection: $selectedBuilding) {
-                            Text("A").tag("A")
-                            Text("B").tag("B")
+                        Picker("Gebäude", selection: Binding(
+                            get: { selectedBuilding ?? "" },
+                            set: { newValue in
+                                selectedBuilding = newValue.isEmpty ? nil : newValue
+                                // Reset subsequent selections
+                                selectedLevel = nil
+                                selectedRoomID = nil
+                            })) {
+                            ForEach(availableBuildings, id: \.self) { building in
+                                Text(building).tag(building)
+                            }
                         }
                         .pickerStyle(.menu)
                         .frame(maxWidth: 80)
+                        .disabled(availableBuildings.isEmpty)
                         .animation(.easeInOut(duration: 0.3), value: selectedBuilding)
                     }
                     HStack(spacing: 12) {
@@ -69,10 +94,12 @@ struct ContentView: View {
                             withAnimation { step += 1 }
                         }
                         .buttonStyle(.borderedProminent)
+                        .disabled(selectedBuilding == nil)
                     }
                     .padding(.top, 12)
                 }
                 .tag(0)
+                
                 // Step 1: Select level
                 VStack {
                     Text("Welche Etage?")
@@ -80,13 +107,19 @@ struct ContentView: View {
                         .padding(.bottom, 8)
                     HStack(spacing: 8) {
                         Text("Bitte auswählen:")
-                        Picker("Etage", selection: $selectedLevel) {
-                            ForEach(levelsForSelectedBuilding, id: \.self) { level in
+                        Picker("Etage", selection: Binding(
+                            get: { selectedLevel ?? Int.min },
+                            set: { newValue in
+                                selectedLevel = newValue == Int.min ? nil : newValue
+                                selectedRoomID = nil
+                            })) {
+                            ForEach(availableLevels, id: \.self) { level in
                                 Text("\(level)").tag(level)
                             }
                         }
                         .pickerStyle(.menu)
                         .frame(maxWidth: 80)
+                        .disabled(selectedBuilding == nil || availableLevels.isEmpty)
                         .animation(.easeInOut(duration: 0.3), value: selectedLevel)
                     }
                     HStack(spacing: 12) {
@@ -100,25 +133,32 @@ struct ContentView: View {
                             withAnimation { step += 1 }
                         }
                         .buttonStyle(.borderedProminent)
+                        .disabled(selectedLevel == nil)
                     }
                     .padding(.top, 12)
                 }
                 .tag(1)
-                // Step 2: Select room
+                
+                // Step 2: Select room/device
                 VStack {
                     Text("Welcher Raum?")
                         .font(.headline)
                         .padding(.bottom, 8)
                     HStack(spacing: 8) {
                         Text("Bitte auswählen:")
-                        Picker("Raum", selection: $selectedRoom) {
-                            ForEach(1...35, id: \.self) { room in
-                                Text("\(room)").tag(room)
+                        Picker("Raum", selection: Binding(
+                            get: { selectedRoomID ?? "" },
+                            set: { newValue in
+                                selectedRoomID = newValue.isEmpty ? nil : newValue
+                            })) {
+                            ForEach(availableDevices) { device in
+                                Text("\(device.room) - \(device.name)").tag(device.id)
                             }
                         }
                         .pickerStyle(.menu)
-                        .frame(maxWidth: 100)
-                        .animation(.easeInOut(duration: 0.3), value: selectedRoom)
+                        .frame(maxWidth: 200)
+                        .disabled(selectedLevel == nil || availableDevices.isEmpty)
+                        .animation(.easeInOut(duration: 0.3), value: selectedRoomID)
                     }
                     HStack(spacing: 12) {
                         if step > 0 {
@@ -131,14 +171,22 @@ struct ContentView: View {
                             withAnimation { step += 1 }
                         }
                         .buttonStyle(.borderedProminent)
+                        .disabled(selectedRoomID == nil)
                     }
                     .padding(.top, 12)
                 }
                 .tag(2)
+                
                 // Step 3: Confirmation and unlock
                 VStack {
                     Text("**Möchten Sie folgenden AppleTV zur Nutzung freischalten?**")
-                    Text("\(selectedBuilding).\(selectedLevel).\(selectedRoom)")
+                    if let building = selectedBuilding,
+                       let level = selectedLevel,
+                       let device = availableDevices.first(where: { $0.id == selectedRoomID }) {
+                        Text("\(building).\(level).\(device.room) – \(device.name)")
+                    } else {
+                        Text("Ungültige Auswahl")
+                    }
                    
                     Text("Die Freischaltung kann nach Anforderung einige Minuten dauern.")
                         .padding(.top, 20)
@@ -159,6 +207,7 @@ struct ContentView: View {
                             showUnlockPopup = true
                         }
                         .buttonStyle(.borderedProminent)
+                        .disabled(selectedBuilding == nil || selectedLevel == nil || selectedRoomID == nil)
                     }
                     .padding(.top, 12)
                 }
@@ -201,6 +250,9 @@ struct ContentView: View {
         .sheet(isPresented: $showUnlockPopup) {
             UnlockPopupView()
         }
+        .task {
+            await apiManager.fetchAvailableDevicesFromBackend()
+        }
     }
     
     private func blinkStatusBar() {
@@ -218,9 +270,9 @@ struct ContentView: View {
                 }
             }
             // Reset form to initial state after blinking
-            selectedBuilding = "A"
-            selectedLevel = 0
-            selectedRoom = 1
+            selectedBuilding = nil
+            selectedLevel = nil
+            selectedRoomID = nil
             step = 0
         }
     }
@@ -311,3 +363,4 @@ struct UnlockPopupView: View {
         .background(.ultraThinMaterial)
     }
 }
+
